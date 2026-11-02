@@ -1,0 +1,300 @@
+
+name: Start Windows RDP - Software GPU Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      # ==========================================
+      # 1. Configure RDP
+      # ==========================================
+      - name: Configure Core RDP Settings
+        if: always()
+        shell: pwsh
+        run: |
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name "fDenyTSConnections" -Value 0 -Force
+
+          # Keep NLA enabled
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "UserAuthentication" -Value 1 -Force
+
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "SecurityLayer" -Value 2 -Force
+
+          Set-Service -Name TermService -StartupType Manual
+          Start-Service -Name TermService
+
+      # ==========================================
+      # 2. Install VS Code and Chrome
+      # ==========================================
+      - name: Install VS Code and Chrome
+        if: always()
+        shell: pwsh
+        run: |
+          winget install --id Microsoft.VisualStudioCode `
+            --exact --silent `
+            --accept-package-agreements `
+            --accept-source-agreements `
+            --scope machine
+
+          winget install --id Google.Chrome `
+            --exact --silent `
+            --accept-package-agreements `
+            --accept-source-agreements
+
+      # ==========================================
+      # 3. Inspect CPU, GPU and WARP
+      # ==========================================
+      - name: Inspect Hardware and WARP
+        if: always()
+        shell: pwsh
+        run: |
+          Write-Host "========== CPU =========="
+
+          Get-CimInstance Win32_Processor |
+            Format-Table Name, NumberOfCores,
+              NumberOfLogicalProcessors -AutoSize
+
+          Write-Host "========== GPU =========="
+
+          Get-CimInstance Win32_VideoController |
+            Format-Table Name, DriverVersion, Status -AutoSize
+
+          Write-Host "========== RAM =========="
+
+          Get-CimInstance Win32_OperatingSystem |
+            Select-Object @{N="RAM_GB";E={
+              [math]::Round($_.TotalVisibleMemorySize / 1MB, 2)
+            }}
+
+          Write-Host "========== WARP =========="
+
+          $warp = "$env:windir\System32\d3d10warp.dll"
+
+          if (Test-Path $warp) {
+              Write-Host "WARP AVAILABLE: $warp"
+          } else {
+              Write-Warning "WARP DLL not found"
+          }
+
+      # ==========================================
+      # 4. Create Chrome SwiftShader shortcut
+      # ==========================================
+      - name: Configure Chrome Software Rendering
+        if: always()
+        shell: pwsh
+        run: |
+          $chrome = "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe"
+
+          if (!(Test-Path $chrome)) {
+              $chrome = "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe"
+          }
+
+          if (!(Test-Path $chrome)) {
+              throw "Chrome not installed"
+          }
+
+          $desktop = [Environment]::GetFolderPath("CommonDesktopDirectory")
+
+          $shortcutPath = Join-Path $desktop "Chrome Software Rendering.lnk"
+
+          $shell = New-Object -ComObject WScript.Shell
+          $shortcut = $shell.CreateShortcut($shortcutPath)
+
+          $shortcut.TargetPath = $chrome
+
+          $shortcut.Arguments = "--user-data-dir=$env:LOCALAPPDATA\Chrome-Software-Test --use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader"
+
+          $shortcut.WorkingDirectory = Split-Path $chrome
+          $shortcut.Description = "Chrome CPU Software Rendering"
+
+          $shortcut.Save()
+
+          Write-Host "Chrome SwiftShader shortcut created"
+
+      # ==========================================
+      # 5. Create RDP user
+      # ==========================================
+      - name: Create RDP User and Generate Password
+        if: always()
+        shell: pwsh
+        run: |
+          $charSet = @{
+              Upper = [char[]](65..90)
+              Lower = [char[]](97..122)
+              Number = [char[]](48..57)
+              Special = ([char[]](33..47) + [char[]](58..64) +
+                         [char[]](91..96) + [char[]](123..126))
+          }
+
+          $rawPassword = @()
+          $rawPassword += $charSet.Upper | Get-Random -Count 4
+          $rawPassword += $charSet.Lower | Get-Random -Count 4
+          $rawPassword += $charSet.Number | Get-Random -Count 4
+          $rawPassword += $charSet.Special | Get-Random -Count 4
+
+          $password = -join ($rawPassword | Sort-Object { Get-Random })
+
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+
+          if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) {
+              Remove-LocalUser -Name "RDP"
+          }
+
+          New-LocalUser -Name "RDP" `
+            -Password $securePass `
+            -AccountNeverExpires
+
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+
+          "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+
+          Write-Host "RDP user created successfully"
+
+      # ==========================================
+      # 6. Install Tailscale
+      # ==========================================
+      - name: Install Tailscale
+        if: always()
+        shell: pwsh
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+
+          Start-Process msiexec.exe `
+            -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" `
+            -Wait
+
+          Remove-Item $installerPath -Force
+
+      # ==========================================
+      # 7. Establish Tailscale
+      # ==========================================
+      - name: Establish Tailscale Connection
+        if: always()
+        shell: pwsh
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          if (!(Test-Path $tsExe)) {
+              throw "Tailscale installation missing"
+          }
+
+          if (!$env:TS_AUTHKEY) {
+              throw "TAILSCALE_AUTH_KEY secret missing"
+          }
+
+          & $tsExe up `
+            --authkey="$env:TS_AUTHKEY" `
+            --hostname="gh-runner-$env:GITHUB_RUN_ID"
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "Tailscale connection failed"
+          }
+
+          $tsIP = $null
+
+          for ($i = 0; $i -lt 20 -and !$tsIP; $i++) {
+              $result = & $tsExe ip -4
+              $tsIP = ($result | Select-Object -First 1).Trim()
+
+              if (!$tsIP) {
+                  Start-Sleep -Seconds 3
+              }
+          }
+
+          if (!$tsIP) {
+              throw "Tailscale IP unavailable"
+          }
+
+          "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
+          Write-Host "Tailscale IP: $tsIP"
+
+      # ==========================================
+      # 8. Configure RDP firewall
+      # ==========================================
+      - name: Configure Tailscale RDP Firewall
+        if: always()
+        shell: pwsh
+        run: |
+          Get-NetFirewallRule -DisplayName "RDP-Tailscale" `
+            -ErrorAction SilentlyContinue |
+            Remove-NetFirewallRule
+
+          New-NetFirewallRule `
+            -DisplayName "RDP-Tailscale" `
+            -Direction Inbound `
+            -Action Allow `
+            -Protocol TCP `
+            -LocalPort 3389 `
+            -RemoteAddress "100.64.0.0/10" `
+            -Profile Any
+
+          Write-Host "RDP firewall rule configured"
+
+      # ==========================================
+      # 9. Verify RDP
+      # ==========================================
+      - name: Verify RDP Accessibility
+        if: always()
+        shell: pwsh
+        run: |
+          if (!$env:TAILSCALE_IP) {
+              throw "Tailscale IP unavailable"
+          }
+
+          $result = Test-NetConnection `
+            -ComputerName $env:TAILSCALE_IP `
+            -Port 3389
+
+          if (!$result.TcpTestSucceeded) {
+              throw "RDP connectivity failed"
+          }
+
+          Write-Host "RDP connectivity successful!"
+
+      # ==========================================
+      # 10. Print credentials and keep alive
+      # ==========================================
+      - name: Get Connection Credentials
+        if: always()
+        shell: pwsh
+        run: |
+          Write-Host ""
+          Write-Host "=================================="
+          Write-Host "          RDP ACCESS"
+          Write-Host "=================================="
+          Write-Host "Address:  $env:TAILSCALE_IP"
+          Write-Host "Username: RDP"
+          Write-Host "Password: $env:RDP_PASSWORD"
+          Write-Host "=================================="
+
+          if (!$env:TAILSCALE_IP -or !$env:RDP_PASSWORD) {
+              Write-Error "RDP prerequisites missing. Cannot establish a working session."
+              exit 1
+          }
+
+          Write-Host "VS Code: Installation attempted"
+          Write-Host "Chrome: Installation attempted"
+          Write-Host "SwiftShader: Configuration attempted"
+          Write-Host "WARP: Availability checked"
+
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP Active"
+              Start-Sleep -Seconds 300
+          }
