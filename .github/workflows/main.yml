@@ -13,6 +13,7 @@ jobs:
       # 1. Configure RDP
       # ==========================================
       - name: Configure Core RDP Settings
+        if: always()
         shell: pwsh
         run: |
           Set-ItemProperty `
@@ -33,6 +34,7 @@ jobs:
       # 2. Install software
       # ==========================================
       - name: Install VS Code and Chrome
+        if: always()
         shell: pwsh
         run: |
           winget install --id Microsoft.VisualStudioCode `
@@ -50,6 +52,7 @@ jobs:
       # 3. Check software rendering support
       # ==========================================
       - name: Configure and Inspect Software GPU
+        if: always()
         shell: pwsh
         run: |
           Write-Host "Checking Microsoft WARP..."
@@ -84,6 +87,7 @@ jobs:
       # 4. Configure Chrome SwiftShader
       # ==========================================
       - name: Create Software Rendering Launcher
+        if: always()
         shell: pwsh
         run: |
           $chrome = "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe"
@@ -119,6 +123,7 @@ jobs:
       # 5. Create RDP user
       # ==========================================
       - name: Create RDP User
+        if: always()
         shell: pwsh
         run: |
           Add-Type -AssemblyName System.Security
@@ -161,6 +166,7 @@ jobs:
       # 6. Install Tailscale
       # ==========================================
       - name: Install Tailscale
+        if: always()
         shell: pwsh
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
@@ -178,6 +184,7 @@ jobs:
       # 7. Connect Tailscale
       # ==========================================
       - name: Establish Tailscale Connection
+        if: always()
         shell: pwsh
         env:
           TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
@@ -203,6 +210,7 @@ jobs:
       # 8. Restrict RDP to Tailscale
       # ==========================================
       - name: Configure Tailscale RDP Firewall
+        if: always()
         shell: pwsh
         run: |
           Get-NetFirewallRule -DisplayName "RDP-Tailscale" `
@@ -224,6 +232,7 @@ jobs:
       # 9. Verify
       # ==========================================
       - name: Verify RDP
+        if: always()
         shell: pwsh
         run: |
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
@@ -242,6 +251,7 @@ jobs:
       # 10. Display credentials and keep alive
       # ==========================================
       - name: RDP Access
+        if: always()
         shell: pwsh
         run: |
           Write-Host "================================"
